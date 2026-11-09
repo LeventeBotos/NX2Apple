@@ -857,8 +857,9 @@ class Machine:
         uc.reg_write(UC_ARM64_REG_LR, STOP)
         uc.reg_write(UC_ARM64_REG_X29, 0)
         self.fault = None
+        insn_cap = max_insns or (max(50_000, timeout_us * 2) if timeout_us else 0)
         try:
-            uc.emu_start(addr, STOP, timeout=timeout_us, count=max_insns)
+            uc.emu_start(addr, STOP, timeout=timeout_us, count=insn_cap)
         except UcError as e:
             pc = uc.reg_read(UC_ARM64_REG_PC)
             raise EmuError(
@@ -904,8 +905,9 @@ class Machine:
         uc.reg_write(UC_ARM64_REG_LR, STOP)
         uc.reg_write(UC_ARM64_REG_X29, 0)
         self.fault = None
+        insn_cap = max(50_000, timeout_us * 2) if timeout_us else 0
         try:
-            uc.emu_start(addr, STOP, timeout=timeout_us)
+            uc.emu_start(addr, STOP, timeout=timeout_us, count=insn_cap)
         except UcError as e:
             pc = uc.reg_read(UC_ARM64_REG_PC)
             raise EmuError(
