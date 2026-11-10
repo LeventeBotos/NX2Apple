@@ -1,0 +1,667 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Levente Botos <botos.levente2007@gmail.com>
+Date: Tue, 10 Nov 2026 11:21:09 +0100
+Subject: [PATCH] Network pads: phones and other local programs as controllers
+
+macOS cannot create a virtual HID gamepad without an entitlement Apple restricts, so a phone cannot be a controller the system lists. A host-side input source can: DM_NETPAD=<port> listens on 127.0.0.1:<port> for UDP datagrams ("P <pad> <buttons> <lx> <ly> <rx> <ry>", "L <pad>") and gives each pad that sends a player of its own.
+
+A pad takes its player from the same slot table as a controller (pad_slots.h), so it never shares a player with a controller or the keyboard, gets its player back when it returns, and follows DM_KBD_PLAYER=own, DM_PAD_PRESS_TO_JOIN and DM_PAD_MERGE. It publishes through controller_publish_player, so the controller applet's prompt counts it, A and B close that prompt, and the window's focus releases it. A pad silent for 2 s leaves, so a dead sender cannot hold a button.
+
+Off unless DM_NETPAD names a port, and bound to 127.0.0.1 only: any local process can send input to a loopback port. The launcher setting "Phone controllers" (Mac only) sets DM_NETPAD=47600.
+
+netpad.h is pure (parsing, clamping, join / leave / expiry as functions of an explicit time) and tested by t_netpad.c. t_netpad_mac.m sends real datagrams to netpad_mac.m, and t_controllers_mac.m covers the slot, merge, press-to-join, full-table and focus rules. Not tested: a phone driving a real game, rumble and motion (not sent), iOS (the _mac files stay out of it).
+
+Front-ends: new: DM_NETPAD (network pads on 127.0.0.1) - a front end can offer the toggle and run a sender
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+
+Upstream-Status: pending
+Reason: Phones as controllers: network pads (DM_NETPAD) for the Mac host, meant for seedds/nxnative
+Issue: LNPANDY/NX2Apple#1122
+
+---
+ dm/games/settings.tsv                    |  1 +
+ dm/host/Makefile                         |  2 +-
+ dm/host/controllers_mac.h                |  4 ++
+ dm/host/controllers_mac.m                | 60 +++++++++++++++++++++
+ dm/host/front_mac.m                      |  1 +
+ dm/host/netpad.h                         | 69 ++++++++++++++++++++++++
+ dm/host/netpad_mac.m                     | 54 +++++++++++++++++++
+ dm/host/tests/Makefile                   |  8 ++-
+ dm/host/tests/t_controllers_mac.m        | 49 +++++++++++++++++
+ dm/host/tests/t_netpad.c                 | 59 ++++++++++++++++++++
+ dm/host/tests/t_netpad_mac.m             | 62 +++++++++++++++++++++
+ dm/tools/tests/test_launcher_settings.py |  2 +-
+ docs/development.md                      |  2 +-
+ docs/env_switches.tsv                    |  1 +
+ docs/mac-controllers.md                  | 23 ++++++++
+ docs/settings.md                         |  7 ++-
+ 16 files changed, 399 insertions(+), 5 deletions(-)
+ create mode 100644 dm/host/netpad.h
+ create mode 100644 dm/host/netpad_mac.m
+ create mode 100644 dm/host/tests/t_netpad.c
+ create mode 100644 dm/host/tests/t_netpad_mac.m
+
+diff --git a/dm/games/settings.tsv b/dm/games/settings.tsv
+index 89c69f1..0820347 100644
+--- a/dm/games/settings.tsv
++++ b/dm/games/settings.tsv
+@@ -32,6 +32,7 @@ DM_RUMBLE	toggle	-	1	always	Controls	Game rumble		level=basic
+ DM_RUMBLE_GAIN	range	0:3:0.1	1.0	always	Controls	Rumble strength		needs=DM_RUMBLE=1
+ DM_RUMBLE_MIN	range	0:0.9:0.05	0	always	Controls	Rumble cutoff
+ DM_PAD_PRESS_TO_JOIN	toggle	-	0	always	Controls	Press a button to join
++DM_NETPAD	toggle	47600/0	0	platform:mac	Controls	Phone controllers	Listens on this Mac only (127.0.0.1) for phones or programs that send controller input; each one becomes a player. Needs an app on the phone that sends it.
+ DM_SW2	toggle	-	0	platform:mac	Controls	Switch 2 controllers	Plays Joy-Con 2 and Pro Controller 2 over Bluetooth: hold Sync on one during the game to pair it. macOS asks once for Bluetooth access.
+ DM_SCREEN_ASPECT	choice	auto=Match screen?platform:ios,1.43=iPhone Duo screen (1.43:1),0=16:9 (Switch)	auto|0	DM_GAME_SCREEN_ASPECT!=0	Game	Picture shape	Renders about a quarter more pixels: a little slower and warmer.
+ DM_PRESENT_SNAP	toggle	-	DM_GAME_PRESENT_SNAP	gfxapi:nvn	Performance	Frame buffering	Up to one frame more display latency.
+diff --git a/dm/host/Makefile b/dm/host/Makefile
+index b01a5fa..7effa44 100644
+--- a/dm/host/Makefile
++++ b/dm/host/Makefile
+@@ -20,7 +20,7 @@ GAME_H = gen/$(GAME)/game_profile.h
+ include ../mac/min_os.mk
+ CFLAGS=-O1 -g -Wall -Wno-unused-function -mmacosx-version-min=$(MACOS_MIN)
+ # Service-layer takeover hle_*.c files are included by wildcard: adding a file does not touch this line (avoids merge conflicts)
+-SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m pad_switch2_apple.m $(sort $(wildcard hle_*.c)) front_mac.m controllers_mac.m web_apple.m entry.S
++SRC=main.c loader.c hle.c crash.c probe.c thread.c save_sync.c memstat.m haptics_apple.m pad_switch2_apple.m $(sort $(wildcard hle_*.c)) front_mac.m controllers_mac.m netpad_mac.m web_apple.m entry.S
+ # NVN null device + nn::vi + the Vulkan layer (dm/gfx/)
+ # Sources under dm/gfx, dm/gfx/nvn, dm/gfx/tex, dm/gfx/vk and dm/gfx/gl are included by wildcard (tests/ and metal/ do not go into the host): adding a file does not touch this line
+ GFX=$(sort $(wildcard ../gfx/*.c ../gfx/nvn/*.c ../gfx/nvn/*.m ../gfx/nvn/*.S ../gfx/tex/*.c ../gfx/tex/*.m ../gfx/vk/*.m ../gfx/gl/*.m))
+diff --git a/dm/host/controllers_mac.h b/dm/host/controllers_mac.h
+index 991a422..97cb403 100644
+--- a/dm/host/controllers_mac.h
++++ b/dm/host/controllers_mac.h
+@@ -2,6 +2,10 @@
+ #import <Cocoa/Cocoa.h>
+ // Main-thread controller routing and a model-specific mapping panel.
+ void front_controllers_start(void);
++// Network pads (netpad_mac.m, netpad.h): netpad_start listens when DM_NETPAD names a port; a pad number 0..DM_PLAYERS-1 that sends takes a player like a controller, one that leaves or goes quiet frees it
++void netpad_start(void);
++void controllers_netpad_set(int pad, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry);
++void controllers_netpad_leave(int pad);
+ NSMenu *front_controllers_menu(void);
+ 
+ #include "front.h"
+diff --git a/dm/host/controllers_mac.m b/dm/host/controllers_mac.m
+index ea1ed6d..96ceb8d 100644
+--- a/dm/host/controllers_mac.m
++++ b/dm/host/controllers_mac.m
+@@ -53,6 +53,11 @@ static NSDictionary *g_legacy_maps; // read-only import of the old controllers.p
+ static pad_map g_button_map;
+ static BOOL g_map_fixed, g_maps_loaded, g_maps_saved;
+ static pad_slots g_slots;
++// Network pads (netpad_mac.m): each pad number holds a slot like a controller does, its owner being its own byte here; the last state it sent is kept for focus changes and the merged player
++static char g_net_owner[DM_PLAYERS];
++static struct { uint64_t buttons; int32_t lx, ly, rx, ry; } g_net_in[DM_PLAYERS];
++static void controller_net_publish_all(void);
++static uint32_t g_net_live, g_net_denied;   // pads that are players (or merged into player 1), and pads refused for want of a free player (logged once)
+ static int g_merge, g_press_to_join, g_focus=1, g_app_focus=1, g_window_focus=1, g_modal, g_quit_prompt, g_applet;
+ static __weak DMController *g_motion_source;
+ static __weak DMController *g_merge_haptics_source;
+@@ -260,6 +265,10 @@ static void controller_publish(DMController *d) {
+             buttons |= pad_map_buttons(s.buttons, pad->map);
+             lx=stronger(lx,s.lx); ly=stronger(ly,s.ly); rx=stronger(rx,s.rx); ry=stronger(ry,s.ry);
+         }
++        for (int p = 0; g_focus && p < DM_PLAYERS; p++) if (g_net_live >> p & 1) {
++            buttons |= g_net_in[p].buttons;
++            lx=stronger(lx,g_net_in[p].lx); ly=stronger(ly,g_net_in[p].ly); rx=stronger(rx,g_net_in[p].rx); ry=stronger(ry,g_net_in[p].ry);
++        }
+         controller_publish_player(0, buttons, lx, ly, rx, ry);
+     } else if (d->slot >= 0) {
+         steam_state s=controller_effective(d);
+@@ -375,6 +384,7 @@ static void controller_update_focus(void) {
+         }
+         front_home_poll();
+     }
++    if(g_focus!=was_focused) controller_net_publish_all();   // network pads follow the same focus: released while it is lost, their last state back with it
+ }
+ void front_controllers_quit_prompt(int active) {
+     if(g_quit_prompt==active) return;
+@@ -399,6 +409,7 @@ void front_controllers_applet_buttons(int *a, int *b) {
+             *a|=!!(m & DM_BTN_A); *b|=!!(m & DM_BTN_B);
+         }
+     }
++    for(int p=0;p<DM_PLAYERS;p++) if(g_net_live>>p&1) { *a|=!!(g_net_in[p].buttons & DM_BTN_A); *b|=!!(g_net_in[p].buttons & DM_BTN_B); }
+ }
+ // Connected controllers that are no player yet
+ int front_controllers_waiting(void) {
+@@ -445,6 +456,55 @@ static void controller_disconnect(DMController *d) {
+     front_cp_poll();   // one controller fewer to wait for, or one player fewer, while the controller applet's prompt is up
+     if(controller_listening()) front_home_poll();
+ }
++// Network pads (netpad_mac.m). A pad takes a player the way a controller does (DM_PAD_PRESS_TO_JOIN: at its first button press, the lowest free one), is published through the same
++// path, and with DM_PAD_MERGE=1 is merged into player 1
++static void controller_net_publish(int pad) {
++    if (g_merge) { controller_publish(nil); return; }
++    int slot = pad_slot_of(&g_slots, &g_net_owner[pad]);
++    if (slot < 0) return;
++    front_cp_poll();
++    if (g_focus) controller_publish_player(slot, g_net_in[pad].buttons, g_net_in[pad].lx, g_net_in[pad].ly, g_net_in[pad].rx, g_net_in[pad].ry);
++    else controller_publish_player(slot, 0, 0, 0, 0, 0);
++}
++static void controller_net_publish_all(void) {
++    for (int p = 0; p < DM_PLAYERS; p++) if (g_net_live >> p & 1) controller_net_publish(p);
++}
++void controllers_netpad_set(int pad, uint64_t buttons, int32_t lx, int32_t ly, int32_t rx, int32_t ry) {
++    if (pad < 0 || pad >= DM_PLAYERS) return;
++    g_net_in[pad].buttons = buttons; g_net_in[pad].lx = lx; g_net_in[pad].ly = ly; g_net_in[pad].rx = rx; g_net_in[pad].ry = ry;
++    if (!(g_net_live >> pad & 1)) {
++        if (g_press_to_join && !buttons) return;
++        if (g_merge) {
++            g_net_live |= 1u << pad;
++            fprintf(stderr, "network pad %d: merged into player 1 (DM_PAD_MERGE)\n", pad + 1);
++        } else {
++            char name[16]; snprintf(name, sizeof name, "phone %d", pad + 1);
++            int slot = g_press_to_join ? pad_slot_take_lowest(&g_slots, &g_net_owner[pad], name) : pad_slot_take(&g_slots, &g_net_owner[pad], name);
++            if (slot < 0) {
++                if (!(g_net_denied >> pad & 1)) fprintf(stderr, "network pad %d: all %d players are taken\n", pad + 1, DM_PLAYERS);
++                g_net_denied |= 1u << pad;
++                return;
++            }
++            g_net_live |= 1u << pad; g_net_denied &= ~(1u << pad);
++            dm_pad_players(pad_slot_mask(&g_slots));
++            fprintf(stderr, "network pad %d: player %d\n", pad + 1, slot + 1);
++        }
++    }
++    controller_net_publish(pad);
++}
++void controllers_netpad_leave(int pad) {
++    if (pad < 0 || pad >= DM_PLAYERS) return;
++    memset(&g_net_in[pad], 0, sizeof g_net_in[pad]); g_net_denied &= ~(1u << pad);
++    if (!(g_net_live >> pad & 1)) return;
++    g_net_live &= ~(1u << pad);
++    if (g_merge) controller_publish(nil);
++    else {
++        int slot = pad_slot_free(&g_slots, &g_net_owner[pad]);
++        if (slot >= 0) { dm_pad_set_player(slot, 0, 0, 0, 0, 0); dm_pad_players(pad_slot_mask(&g_slots)); }
++    }
++    fprintf(stderr, "network pad %d: left\n", pad + 1);
++    front_cp_poll();   // one player fewer while the controller applet's prompt is up
++}
+ // Generic HID uses the same registry, slot table and shared button map as GC
+ // and Triton. Its decoder keeps physical state through focus changes.
+ static DMController *controller_for_hid(hid_pad *hid) {
+diff --git a/dm/host/front_mac.m b/dm/host/front_mac.m
+index b407953..399c5c9 100644
+--- a/dm/host/front_mac.m
++++ b/dm/host/front_mac.m
+@@ -1482,6 +1482,7 @@ void front_run(void (*guest)(void)) {
+         hq_start();
+         bg_start();
+         front_controllers_start();
++        netpad_start();   // DM_NETPAD=<port>: phones as controllers (netpad_mac.m)
+         hq_log_setting();
+         [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue
+                                                    usingBlock:^(NSNotification *n) { (void)n; hq_log_setting(); }];
+diff --git a/dm/host/netpad.h b/dm/host/netpad.h
+new file mode 100644
+index 0000000..2ce4ce1
+--- /dev/null
++++ b/dm/host/netpad.h
+@@ -0,0 +1,69 @@
++// Network pads (netpad_mac.m; pure, so tests/t_netpad.c checks it without a socket): a phone or another local program drives a pad over UDP on 127.0.0.1, one datagram per message.
++//   P <pad> <buttons> <lx> <ly> <rx> <ry>   the pad's state: <pad> 1..DM_PLAYERS is the sender's own pad number (the host gives it a player the way it gives a controller one, pad_slots.h),
++//                                           <buttons> the DM_BTN_* bits 0..15 (dm_input.h) as a decimal number, the sticks -32767..32767 (clamped), +y up
++//   L <pad>                                 the pad has left (everything released)
++// A pad that sends nothing for NETPAD_TIMEOUT_S has left too, so a sender that dies cannot leave a button held; a sender repeats its P message about once a second while nothing changes.
++// A message is plain ASCII, fields split by spaces, a trailing newline or CR allowed (nc -u sends one). Anything else is ignored whole: no field is guessed.
++#pragma once
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include "dm_input.h"
++
++#define NETPAD_PORT 47600        // what the launcher's "Phone controllers" setting selects (DM_NETPAD=47600); the host never opens a port on its own
++#define NETPAD_TIMEOUT_S 2.0
++#define NETPAD_MAX_LEN 96        // a longer datagram is not ours
++
++typedef struct { char kind; int pad; uint64_t buttons; int32_t lx, ly, rx, ry; } netpad_msg;   // kind 'P' or 'L'; pad is 0..DM_PLAYERS-1
++
++// One whole decimal number after at least one space: an optional sign, 1..18 digits. Moves *p past it.
++static int netpad_num(const char **p, long long *v) {
++    const char *s = *p;
++    if (*s != ' ') return 0;
++    while (*s == ' ') s++;
++    int neg = 0;
++    if (*s == '-' || *s == '+') neg = *s++ == '-';
++    int n = 0; long long x = 0;
++    for (; *s >= '0' && *s <= '9'; s++, n++) { if (n >= 18) return 0; x = x * 10 + (*s - '0'); }
++    if (!n) return 0;
++    *p = s; *v = neg ? -x : x;
++    return 1;
++}
++static int32_t netpad_stick(long long v) { return v > DM_STICK_MAX ? DM_STICK_MAX : v < -DM_STICK_MAX ? -DM_STICK_MAX : (int32_t)v; }
++// Parses one datagram (not NUL-terminated, n bytes) into *out. Returns 1 for a message that is whole and valid, else 0 and *out is not to be used.
++static int netpad_parse(const char *data, size_t n, netpad_msg *out) {
++    if (!data || n < 3 || n > NETPAD_MAX_LEN || memchr(data, 0, n)) return 0;
++    char b[NETPAD_MAX_LEN + 1]; memcpy(b, data, n); b[n] = 0;
++    while (n && (b[n - 1] == '\n' || b[n - 1] == '\r' || b[n - 1] == ' ')) b[--n] = 0;
++    if ((b[0] != 'P' && b[0] != 'L') || b[1] != ' ') return 0;
++    const char *p = b + 1; long long v[6]; int want = b[0] == 'P' ? 6 : 1;
++    for (int i = 0; i < want; i++) if (!netpad_num(&p, &v[i])) return 0;
++    if (*p || v[0] < 1 || v[0] > DM_PLAYERS) return 0;
++    if (want == 6 && v[1] < 0) return 0;
++    *out = (netpad_msg){.kind = b[0], .pad = (int)v[0] - 1};
++    if (want == 6) {
++        out->buttons = (uint64_t)v[1] & 0xffffull;   // bits 0..15 only: the rail buttons and Shake are not a phone's to press
++        out->lx = netpad_stick(v[2]); out->ly = netpad_stick(v[3]); out->rx = netpad_stick(v[4]); out->ry = netpad_stick(v[5]);
++    }
++    return 1;
++}
++
++// Which pads are live and when each last sent. The caller gives every time (seconds on any steady clock), so tests need no clock.
++typedef struct { uint32_t live; double seen[DM_PLAYERS]; } netpad_state;
++
++static int netpad_touch(netpad_state *s, int pad, double now) {   // a message from pad: 1 when it was not live before
++    int fresh = !(s->live >> pad & 1);
++    s->live |= 1u << pad; s->seen[pad] = now;
++    return fresh;
++}
++static int netpad_leave(netpad_state *s, int pad) {   // 1 when the pad was live
++    int was = s->live >> pad & 1;
++    s->live &= ~(1u << pad);
++    return was;
++}
++static uint32_t netpad_expire(netpad_state *s, double now, double timeout) {   // pads silent for more than timeout, now not live: a mask
++    uint32_t gone = 0;
++    for (int p = 0; p < DM_PLAYERS; p++) if ((s->live >> p & 1) && now - s->seen[p] > timeout) gone |= 1u << p;
++    s->live &= ~gone;
++    return gone;
++}
+diff --git a/dm/host/netpad_mac.m b/dm/host/netpad_mac.m
+new file mode 100644
+index 0000000..55b5fd0
+--- /dev/null
++++ b/dm/host/netpad_mac.m
+@@ -0,0 +1,54 @@
++// Network pads on the Mac host (netpad.h has the messages): DM_NETPAD=<port> listens on 127.0.0.1:<port> for UDP datagrams from a phone's controller page or any local program, and each pad
++// that sends becomes a player of its own like a physical controller (controllers_mac.m: the same slots, merge mode, press-to-join and focus rules). Off unless DM_NETPAD names a port:
++// any process on this Mac can send to a loopback port, so the player turns it on (the launcher's "Phone controllers" setting sets DM_NETPAD=47600). Everything runs on the main queue.
++#import <Foundation/Foundation.h>
++#include <arpa/inet.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <netinet/in.h>
++#include <stdio.h>
++#include <sys/socket.h>
++#include <time.h>
++#include <unistd.h>
++#include "controllers_mac.h"
++#include "netpad.h"
++
++static dispatch_source_t g_netpad_read, g_netpad_timer;   // kept in statics: a dispatch source that ARC releases is cancelled
++static netpad_state g_netpad;
++
++static double netpad_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + t.tv_nsec / 1e9; }
++static void netpad_packet(const char *data, size_t n, double now) {
++    netpad_msg m;
++    if (!netpad_parse(data, n, &m)) return;
++    if (m.kind == 'L') { if (netpad_leave(&g_netpad, m.pad)) controllers_netpad_leave(m.pad); return; }
++    netpad_touch(&g_netpad, m.pad, now);
++    controllers_netpad_set(m.pad, m.buttons, m.lx, m.ly, m.rx, m.ry);
++}
++static void netpad_expire_at(double now) {   // a pad whose sender went quiet leaves, so a crashed sender cannot hold a button
++    uint32_t gone = netpad_expire(&g_netpad, now, NETPAD_TIMEOUT_S);
++    for (int p = 0; p < DM_PLAYERS; p++) if (gone >> p & 1) controllers_netpad_leave(p);
++}
++
++void netpad_start(void) {
++    const char *e = getenv("DM_NETPAD");
++    if (!e || !*e || !strcmp(e, "0")) return;
++    char *end; long port = strtol(e, &end, 10);
++    if (*end || port < 1 || port > 65535) { fprintf(stderr, "netpad: DM_NETPAD=%s is not a port (1..65535), network pads are off\n", e); return; }
++    int fd = socket(AF_INET, SOCK_DGRAM, 0);
++    if (fd < 0) { fprintf(stderr, "netpad: socket: %s\n", strerror(errno)); return; }
++    struct sockaddr_in a = {.sin_len = sizeof a, .sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
++    if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { fprintf(stderr, "netpad: cannot bind 127.0.0.1:%ld (%s), network pads are off\n", port, strerror(errno)); close(fd); return; }
++    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
++    g_netpad_read = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, (uintptr_t)fd, 0, dispatch_get_main_queue());
++    dispatch_source_set_event_handler(g_netpad_read, ^{
++        char buf[NETPAD_MAX_LEN + 1]; ssize_t n;   // one byte more than a message can be, so a longer datagram is seen as such
++        while ((n = recv(fd, buf, sizeof buf, 0)) >= 0) netpad_packet(buf, (size_t)n, netpad_now());
++    });
++    dispatch_source_set_cancel_handler(g_netpad_read, ^{ close(fd); });
++    dispatch_resume(g_netpad_read);
++    g_netpad_timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
++    dispatch_source_set_timer(g_netpad_timer, dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC / 2), NSEC_PER_SEC / 2, NSEC_PER_SEC / 10);
++    dispatch_source_set_event_handler(g_netpad_timer, ^{ netpad_expire_at(netpad_now()); });
++    dispatch_resume(g_netpad_timer);
++    fprintf(stderr, "netpad: network pads listen on 127.0.0.1:%ld (DM_NETPAD)\n", port);
++}
+diff --git a/dm/host/tests/Makefile b/dm/host/tests/Makefile
+index a72ec86..23185ea 100644
+--- a/dm/host/tests/Makefile
++++ b/dm/host/tests/Makefile
+@@ -12,7 +12,7 @@ QUIET = $(if $(findstring -fsanitize,$(SAN)),,2>/dev/null)
+ GINC = $(if $(strip $(GAME)),-I../gen/$(GAME) -I../../games/$(GAME),$(error GAME is not set: make GAME=<base game title ID>: $(shell python3 ../../games/game.py list | awk -F'\t' '{printf "%s (%s)  ", $$1, $$3}')))
+ $(B)/t_fs $(B)/t_fs_case $(B)/t_fs_commit_list $(B)/t_fs_commit_list_tsan: ../romfs_image.h
+ GAME_H = ../gen/$(GAME)/game_profile.h
+-run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2 $(B)/t_input_map $(B)/t_launcher_contract $(B)/t_profile_runtime
++run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_touch $(B)/t_gesture $(B)/t_oe $(B)/t_fs $(B)/t_fs_commit_list $(B)/t_thread_leak $(B)/t_fs_case $(B)/t_audio $(B)/t_output_stream $(B)/t_audio_spsc $(B)/t_swkbd $(B)/t_altstack $(B)/t_condvar $(B)/t_condvar_old $(B)/t_pollwait $(B)/t_clockwait $(B)/t_pause $(B)/t_pause_stress $(B)/t_pctl $(B)/t_sf $(B)/t_time $(B)/t_shared_font $(B)/t_vorbis $(B)/t_vorbis_divides $(B)/t_hid $(B)/t_haptics $(B)/t_haptics_apple $(B)/t_cheats $(B)/t_pad_hid $(B)/t_switch2 $(B)/t_input_map $(B)/t_netpad $(B)/t_netpad_mac $(B)/t_launcher_contract $(B)/t_profile_runtime
+ 	$(B)/t_language
+ 	$(B)/t_heap_size
+ 	$(B)/t_touch
+@@ -73,6 +73,8 @@ run: $(B)/t_net_eventfd $(B)/t_language $(B)/t_motion $(B)/t_heap_size $(B)/t_to
+ 	$(B)/t_pad_pro
+ 	$(B)/t_switch2
+ 	$(B)/t_input_map
++	$(B)/t_netpad
++	$(B)/t_netpad_mac
+ 	$(B)/t_launcher_contract
+ 	$(B)/t_haptics
+ 	$(B)/t_haptics_apple
+@@ -252,6 +254,10 @@ $(B)/t_motion_pro_mac: t_motion_pro_mac.m ../motion_pro_mac.h ../motion_pro.h ..
+ 	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_motion_pro_mac.m -framework Foundation -framework GameController -framework IOKit
+ $(B)/t_input_map: t_input_map.c ../input_map.h ../dm_input.h | $(B)
+ 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. -o $@ t_input_map.c
++$(B)/t_netpad: t_netpad.c ../netpad.h ../dm_input.h | $(B)
++	$(CLANG) -O1 -g -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_netpad.c
++$(B)/t_netpad_mac: t_netpad_mac.m ../netpad_mac.m ../netpad.h ../controllers_mac.h ../front.h ../dm_input.h | $(B)
++	$(CLANG) -O1 -g -fobjc-arc -Wall -Werror -Wno-unused-function -fsanitize=address,undefined -I.. -o $@ t_netpad_mac.m -framework Cocoa
+ $(B)/t_launcher_contract: t_launcher_contract.c ../input_map.h ../dm_input.h | $(B)
+ 	$(CLANG) -O1 -Wall -Werror -Wno-unused-function -I.. -o $@ t_launcher_contract.c
+ $(B)/t_hid: t_hid.c ../hle_hid.c ../motion_fusion.h ../hle_haptics.c ../hle_haptics.h ../pad_slots.h ../dm_input.h ../hle.h ../dm.h $(GAME_H) | $(B)
+diff --git a/dm/host/tests/t_controllers_mac.m b/dm/host/tests/t_controllers_mac.m
+index 190ad3d..5734b01 100644
+--- a/dm/host/tests/t_controllers_mac.m
++++ b/dm/host/tests/t_controllers_mac.m
+@@ -678,6 +678,54 @@ static void test_merged_hotplug(void) {
+     controller_disconnect(puck); assert(!raw_output[0] && !rumble[0]);
+     g_devices=[NSMutableArray array]; g_slots=(pad_slots){0}; g_merge=0;
+ }
++// Network pads (netpad_mac.m) take their players from the same slots as controllers: they never share a player with one, get their player back when they return, follow
++// DM_KBD_PLAYER=own, DM_PAD_PRESS_TO_JOIN, DM_PAD_MERGE and the window's focus, and a full table refuses a pad once
++static void test_netpad_players(void) {
++    memset(received,0,sizeof received); players=0;
++    GCController *c=[HapticController new]; DMController *pad=controller_add_gc(c);   // a physical controller is player 1
++    [c.extendedGamepad.buttonA setValue:1]; gc_event(pad);
++    assert(pad->slot==0 && received[0]==DM_BTN_B && players==1);
++    controllers_netpad_set(0,DM_BTN_A|DM_BTN_X,100,-200,300,-400);   // phone 1: the next free player, not player 1
++    assert(players==3 && received[1]==(DM_BTN_A|DM_BTN_X) && axes[1][0]==100 && axes[1][1]==-200 && axes[1][2]==300 && axes[1][3]==-400);
++    assert(received[0]==DM_BTN_B);   // the controller's player is untouched
++    controllers_netpad_set(1,DM_BTN_L,0,0,0,0); assert(players==7 && received[2]==DM_BTN_L);
++    unsigned updates=pad_updates[1]; controllers_netpad_set(0,DM_BTN_A,0,0,0,0); assert(received[1]==DM_BTN_A && pad_updates[1]==updates+1 && players==7);
++    controllers_netpad_leave(0); assert(received[1]==0 && players==5);
++    controllers_netpad_leave(0); assert(players==5);   // leaving twice changes nothing
++    GCController *c2=[HapticController new]; DMController *pad2=controller_add_gc(c2);   // a controller arriving meanwhile does not take the phone's player
++    [c2.extendedGamepad.buttonA setValue:1]; gc_event(pad2); assert(pad2->slot==3);
++    controllers_netpad_set(0,DM_BTN_B,0,0,0,0); assert(received[1]==DM_BTN_B && players==15);   // phone 1 is player 2 again
++    front_controllers_window(0); assert(received[1]==0 && received[2]==0);   // focus lost: released
++    controllers_netpad_set(0,DM_BTN_Y,0,0,0,0); assert(received[1]==0);       // and a message meanwhile presses nothing
++    front_controllers_window(1); assert(received[1]==DM_BTN_Y && received[2]==DM_BTN_L);   // focus back: the last state
++    controllers_netpad_leave(0); controllers_netpad_leave(1); controller_disconnect(pad2); controller_disconnect(pad);
++    assert(players==0 && pad_slot_mask(&g_slots)==0);
++    // the keyboard on its own takes player 1 first
++    static const char keyboard=0; g_slots=(pad_slots){0}; pad_slot_take(&g_slots,&keyboard,"keyboard");
++    controllers_netpad_set(2,DM_BTN_A,0,0,0,0); assert(players==3 && received[1]==DM_BTN_A);
++    controllers_netpad_leave(2); g_slots=(pad_slots){0}; players=0;
++    // a full table: the pad is refused, and logged once
++    static const char others[8]; for(int i=0;i<8;i++) pad_slot_take(&g_slots,&others[i],"x");
++    controllers_netpad_set(0,DM_BTN_A,0,0,0,0); assert(players==0 && g_net_denied==1 && !(g_net_live&1));
++    g_slots.owner[3]=NULL; controllers_netpad_set(0,DM_BTN_A,0,0,0,0); assert(!g_net_denied && received[3]==DM_BTN_A);   // a player freed: the next message joins
++    controllers_netpad_leave(0); g_slots=(pad_slots){0}; players=0;
++    // DM_PAD_PRESS_TO_JOIN: a pad is no player until it presses a button, then the lowest free
++    g_press_to_join=1;
++    controllers_netpad_set(1,0,30000,0,0,0); assert(players==0 && !g_net_live);
++    controllers_netpad_set(1,DM_BTN_A,0,0,0,0); assert(g_net_live==2 && players==1 && received[0]==DM_BTN_A);
++    controllers_netpad_leave(1); g_press_to_join=0; g_slots=(pad_slots){0}; players=0;
++    // DM_PAD_MERGE=1: every pad is player 1, together with the controllers
++    g_merge=1; memset(received,0,sizeof received);
++    controllers_netpad_set(0,DM_BTN_A,1000,0,0,0); controllers_netpad_set(3,DM_BTN_X,-2000,0,0,0);
++    assert(received[0]==(DM_BTN_A|DM_BTN_X) && axes[0][0]==-2000 && !pad_slot_mask(&g_slots));
++    GCController *c3=[HapticController new]; DMController *m=controller_add_gc(c3); [c3.extendedGamepad.buttonA setValue:1]; gc_event(m);
++    assert(received[0]==(DM_BTN_A|DM_BTN_X|DM_BTN_B));
++    controllers_netpad_leave(3); assert(received[0]==(DM_BTN_A|DM_BTN_B));
++    controllers_netpad_leave(0); assert(received[0]==DM_BTN_B);
++    controller_disconnect(m);
++    g_merge=0; g_devices=[NSMutableArray array]; g_slots=(pad_slots){0}; players=0; g_net_live=g_net_denied=0;
++    memset(received,0,sizeof received);
++}
+ // A launcher-authored map must reach both adapters, and a panel edit must be
+ // visible to the launcher in the same domain. Each run owns a disposable domain.
+ static void test_shared_controls(void) {
+@@ -987,6 +1035,7 @@ int main(int argc, char **argv) {
+         test_unknown_hid_identity(YES);
+         test_incomplete_discovery();
+         test_merged_hotplug();
++        test_netpad_players();
+         test_generic_hid_routing();
+         test_home_quit_routing();
+         test_generic_hid_ownership();
+diff --git a/dm/host/tests/t_netpad.c b/dm/host/tests/t_netpad.c
+new file mode 100644
+index 0000000..104a08e
+--- /dev/null
++++ b/dm/host/tests/t_netpad.c
+@@ -0,0 +1,59 @@
++// Network pads (netpad.h): the messages a phone sends, what is ignored whole, and which pads are live as a function of an explicit time
++#include <stdio.h>
++#include "../netpad.h"
++
++static int checks, fails;
++#define CHECK(c, msg) do { checks++; if (!(c)) { fails++; fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); } } while (0)
++static int parse(const char *s, netpad_msg *m) { return netpad_parse(s, strlen(s), m); }
++
++int main(void) {
++    netpad_msg m;
++    CHECK(parse("P 1 0 0 0 0 0", &m) && m.kind == 'P' && m.pad == 0 && !m.buttons && !m.lx && !m.ry, "an idle pad 1");
++    CHECK(parse("P 8 65535 32767 -32767 1 -1", &m) && m.pad == 7 && m.buttons == 0xffff && m.lx == 32767 && m.ly == -32767 && m.rx == 1 && m.ry == -1, "pad 8, every button, the sticks as sent");
++    CHECK(parse("P 3 1 0 0 0 0\n", &m) && m.pad == 2 && m.buttons == 1, "nc -u's newline is fine");
++    CHECK(parse("P 3 1 0 0 0 0\r\n", &m) && parse("P  2   5  1  2  3  4 ", &m) && m.pad == 1 && m.buttons == 5 && m.ry == 4, "CR LF and repeated spaces are fine");
++    CHECK(parse("P 2 +4 +7 0 0 0", &m) && m.buttons == 4 && m.lx == 7, "a plus sign is fine");
++    CHECK(parse("L 4", &m) && m.kind == 'L' && m.pad == 3, "a pad leaves");
++    CHECK(parse("L 4\n", &m) && m.pad == 3, "a leave with a newline");
++
++    // clamping and masking
++    CHECK(parse("P 1 0 99999 -99999 40000 -40000", &m) && m.lx == DM_STICK_MAX && m.ly == -DM_STICK_MAX && m.rx == DM_STICK_MAX && m.ry == -DM_STICK_MAX, "sticks clamp to +-32767");
++    CHECK(parse("P 1 -0 0 0 0 0", &m) && !m.buttons, "-0 is zero");
++    CHECK(parse("P 1 4294967295 0 0 0 0", &m) && m.buttons == 0xffff, "buttons above bit 15 are dropped");
++    CHECK(parse("P 1 16777216 0 0 0 0", &m) && m.buttons == 0, "the rail buttons (bit 24) are dropped");
++    CHECK(parse("P 1 9223372036854775808 0 0 0 0", &m) == 0 || m.buttons <= 0xffff, "a 19 digit number is refused or masked, never wraps into a stick");
++    CHECK(!parse("P 1 0 0 0 0 9999999999999999999", &m), "a 19 digit stick is refused");
++    CHECK(parse("P 1 0 999999999999999999 0 0 0", &m) && m.lx == DM_STICK_MAX, "an 18 digit stick clamps");
++
++    // ignored whole
++    const char *bad[] = {"", "P", "P ", "P 1", "P 1 0 0 0 0", "P 1 0 0 0 0 0 0", "P 1 0 0 0 0 0 x", "P 0 0 0 0 0 0", "P 9 0 0 0 0 0", "P -1 0 0 0 0 0", "P 1 -1 0 0 0 0",
++                         "P1 0 0 0 0 0", "p 1 0 0 0 0 0", "Q 1 0 0 0 0 0", "L", "L ", "L 0", "L 9", "L 1 1", "L x", "L 1x", "P 1 0x10 0 0 0 0", "P 1 1.5 0 0 0 0", "P 1 0 0 0 0 0,",
++                         "P 1 0 0 0 0 --1", "P 1 0 0 0 0 +", " P 1 0 0 0 0 0", "P\t1 0 0 0 0 0", "P 1 0 0 0 0 0\n0", "P 1 0 0 0 0 0 junk", "P 1e0 0 0 0 0 0", "PL 1"};
++    for (size_t i = 0; i < sizeof bad / sizeof *bad; i++) { char msg[96]; snprintf(msg, sizeof msg, "ignored: \"%s\"", bad[i]); CHECK(!parse(bad[i], &m), msg); }
++    CHECK(!netpad_parse("P 1 0 0 0 0 0\0", 14, &m), "an embedded NUL is refused");
++    CHECK(!netpad_parse(NULL, 5, &m), "no data is refused");
++    CHECK(!netpad_parse("P 1 0 0 0 0 0", 2, &m), "a truncated datagram (only \"P \") is refused");
++    char big[NETPAD_MAX_LEN + 8]; memset(big, ' ', sizeof big); memcpy(big, "P 1 0 0 0 0 0", 13);
++    CHECK(netpad_parse(big, NETPAD_MAX_LEN, &m) && !netpad_parse(big, NETPAD_MAX_LEN + 1, &m), "a datagram of NETPAD_MAX_LEN is read, one byte more is not ours");
++    memset(big, '9', sizeof big); memcpy(big, "P 1 ", 4);
++    CHECK(!netpad_parse(big, NETPAD_MAX_LEN, &m), "a very long number is refused");
++    const char unterminated[3] = {'L', ' ', '2'};
++    CHECK(netpad_parse(unterminated, 3, &m) && m.pad == 1, "the data need not be NUL-terminated");
++
++    // who is live
++    netpad_state s; memset(&s, 0, sizeof s);
++    CHECK(netpad_touch(&s, 0, 0.0) == 1 && s.live == 1, "the first message joins (also at time 0)");
++    CHECK(netpad_touch(&s, 0, 0.5) == 0, "a later message of the same pad is no join");
++    CHECK(netpad_touch(&s, 2, 1.0) == 1 && s.live == 5, "another pad joins");
++    CHECK(netpad_expire(&s, 2.5, NETPAD_TIMEOUT_S) == 0, "nothing expires at exactly the timeout of pad 1 (2.5 - 0.5 = 2.0 is not more)");
++    CHECK(netpad_expire(&s, 2.6, NETPAD_TIMEOUT_S) == 1 && s.live == 4, "pad 1 expires just after the timeout, pad 3 stays");
++    CHECK(netpad_expire(&s, 2.7, NETPAD_TIMEOUT_S) == 0, "an expired pad is reported once");
++    CHECK(netpad_touch(&s, 0, 3.0) == 1, "an expired pad that sends again joins again");
++    CHECK(netpad_leave(&s, 0) == 1 && netpad_leave(&s, 0) == 0 && s.live == 4, "a pad leaves once");
++    CHECK(netpad_expire(&s, 100.0, NETPAD_TIMEOUT_S) == 4 && !s.live, "a silent pad expires, whatever the gap");
++    for (int p = 0; p < DM_PLAYERS; p++) netpad_touch(&s, p, 10.0);
++    CHECK(s.live == (1u << DM_PLAYERS) - 1 && netpad_expire(&s, 13.0, NETPAD_TIMEOUT_S) == (1u << DM_PLAYERS) - 1, "all eight pads join and expire together");
++
++    printf("netpad: %d checks, %d failed\n", checks, fails);
++    return fails != 0;
++}
+diff --git a/dm/host/tests/t_netpad_mac.m b/dm/host/tests/t_netpad_mac.m
+new file mode 100644
+index 0000000..10fa387
+--- /dev/null
++++ b/dm/host/tests/t_netpad_mac.m
+@@ -0,0 +1,62 @@
++// Network pads on the Mac host (netpad_mac.m): real datagrams to a loopback port reach the controller hooks, bad ones and a bad DM_NETPAD do not, and a silent pad leaves
++#import <Foundation/Foundation.h>
++#include <assert.h>
++#include "../netpad_mac.m"
++
++static int sets, leaves, last_pad = -1; static uint64_t last_buttons; static int32_t last_axes[4];
++void controllers_netpad_set(int pad, uint64_t b, int32_t lx, int32_t ly, int32_t rx, int32_t ry) { sets++; last_pad = pad; last_buttons = b; last_axes[0] = lx; last_axes[1] = ly; last_axes[2] = rx; last_axes[3] = ry; }
++void controllers_netpad_leave(int pad) { leaves++; last_pad = pad; }
++
++static void send_to(int port, const char *msg) {
++    int fd = socket(AF_INET, SOCK_DGRAM, 0); assert(fd >= 0);
++    struct sockaddr_in a = {.sin_len = sizeof a, .sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
++    assert(sendto(fd, msg, strlen(msg), 0, (struct sockaddr *)&a, sizeof a) == (ssize_t)strlen(msg));
++    close(fd);
++}
++static void spin(double s) { [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:s]]; }
++
++int main(void) {
++    @autoreleasepool {
++        // off unless DM_NETPAD names a port
++        unsetenv("DM_NETPAD"); netpad_start(); assert(!g_netpad_read);
++        setenv("DM_NETPAD", "0", 1); netpad_start(); assert(!g_netpad_read);
++        setenv("DM_NETPAD", "", 1); netpad_start(); assert(!g_netpad_read);
++        setenv("DM_NETPAD", "47x", 1); netpad_start(); assert(!g_netpad_read);
++        setenv("DM_NETPAD", "70000", 1); netpad_start(); assert(!g_netpad_read);
++        setenv("DM_NETPAD", "-5", 1); netpad_start(); assert(!g_netpad_read);
++
++        int port = 20000 + (int)(getpid() % 20000);
++        char env[16]; snprintf(env, sizeof env, "%d", port); setenv("DM_NETPAD", env, 1);
++        netpad_start(); assert(g_netpad_read && g_netpad_timer);
++
++        send_to(port, "P 2 4097 100 -200 300 -400\n"); spin(0.2);
++        assert(sets == 1 && last_pad == 1 && last_buttons == 4097 && last_axes[0] == 100 && last_axes[1] == -200 && last_axes[2] == 300 && last_axes[3] == -400);
++        send_to(port, "P 2 1 99999 0 0 0"); spin(0.2);
++        assert(sets == 2 && last_axes[0] == DM_STICK_MAX);
++        send_to(port, "garbage"); send_to(port, "P 9 0 0 0 0 0"); send_to(port, "P 1 0 0 0 0"); send_to(port, ""); spin(0.2);
++        assert(sets == 2 && leaves == 0);
++        char big[200]; memset(big, '1', sizeof big - 1); big[sizeof big - 1] = 0; memcpy(big, "P 1 ", 4);
++        send_to(port, big); spin(0.2);
++        assert(sets == 2);
++        send_to(port, "L 2"); spin(0.2);
++        assert(leaves == 1 && last_pad == 1);
++        send_to(port, "L 2"); spin(0.2);
++        assert(leaves == 1);   // already gone
++
++        // several datagrams in one wake-up are all read, in order
++        send_to(port, "P 3 1 0 0 0 0"); send_to(port, "P 4 2 0 0 0 0"); send_to(port, "P 3 8 0 0 0 0"); spin(0.2);
++        assert(sets == 5 && last_pad == 2 && last_buttons == 8);
++
++        // a second start on a taken port does not open another listener
++        dispatch_source_t first = g_netpad_read; netpad_start();
++        assert(g_netpad_read == first);
++
++        // silence: pads 3 and 4 leave once, and only when more than the timeout has passed since their last message
++        double t = netpad_now();
++        netpad_expire_at(t + 1.0); assert(leaves == 1);
++        netpad_expire_at(t + NETPAD_TIMEOUT_S + 1.0); assert(leaves == 3);
++        netpad_expire_at(t + 100.0); assert(leaves == 3);
++        puts("network pads: datagrams, bad input, DM_NETPAD values and the timeout: OK");
++    }
++    return 0;
++}
+diff --git a/dm/tools/tests/test_launcher_settings.py b/dm/tools/tests/test_launcher_settings.py
+index eb71811..e9c40a4 100644
+--- a/dm/tools/tests/test_launcher_settings.py
++++ b/dm/tools/tests/test_launcher_settings.py
+@@ -110,7 +110,7 @@ class LauncherSettingsTests(unittest.TestCase):
+         self.assertEqual(build(BOTW, 'nvn', 'ios').keys(), ios.keys())   # ios when unset
+         self.assertEqual(set(ios) - set(mac), {'DM_SHOW_FPS', 'DM_TOUCH_HAPTICS', 'DM_PICTURE_FIT', 'DM_TOUCH_SIZE', 'DM_TOUCH_STICK'})
+         self.assertIn('DM_RUMBLE', mac); self.assertIn('DM_METAL_HUD', mac)
+-        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
++        self.assertEqual(set(mac) - set(ios), {'DM_FULLSCREEN', 'DM_NETPAD', 'DM_SW2'})   # the Mac window's Display mode (front_mac.m reads 1 or 0); phone controllers (netpad_mac.m, the Mac only); Switch 2 controllers (pad_switch2_apple.m, wired on the Mac only)
+         s = mac['DM_FULLSCREEN']
+         self.assertEqual((s['kind'], s['default'], s['options'], s['level']), ('choice', '0', [['0', 'Window'], ['1', 'Fullscreen']], 'basic'))
+ 
+diff --git a/docs/development.md b/docs/development.md
+index d19ed85..96927ae 100644
+--- a/docs/development.md
++++ b/docs/development.md
+@@ -10,7 +10,7 @@ The README covers packing and playing. This page is for working on nxnative itse
+ | Host (`dm/host`) | Stands in for the Horizon kernel and the system services the games call: threads and synchronization, memory, file system with transactional saves, HID, audio, movies (VP9 through libvpx, Vorbis sound through stb_vorbis), software keyboard, focus and lifecycle |
+ | Graphics (`dm/gfx`) | NVN on Metal. Shaders are extracted by `shader_split.py` from Nintendo's containers and from Unity's `Shader` objects, then translated offline. Mario: 16,266 of 16,268 shaders compile. Engage: 9,268 of 9,269. Games that render with Vulkan (Hades) or OpenGL (Digimon Story Cyber Sleuth) go through layers of their own on Metal (`dm/gfx/vk`, `dm/gfx/gl`) |
+ | Audio | Games that carry the SDK's audio renderer (Mario) run it in-process; games that use AudioOut directly (Engage: Wwise) feed it straight. With Core Audio enabled (default on iOS, `DM_AUDIO=1` on the Mac), the [silent sink keeps releasing PCM buffers while a device starts or retries](reference/audio.md#a-blocked-audio-device-start-freezes-the-game). |
+-| Input | iOS: the touch gamepad (hidden while a physical controller is connected) and physical controllers; shaking the phone shakes the controller (its six-axis sensor, `hle_hid.c`; the accelerometer in `DmGamepad.m`, threshold `DM_SHAKE_G`, 1.5 G by default). Mac: scripted input (`DM_KEYS=<seconds>:<button>,…`, `Shake` for a shake, with `DM_KBD=<text>` answering the system keyboard; `DM_REC=<file>` records what the player does in that syntax, [05](agents/05-debugging.md#scripted-input-and-thread-scheduling)) or `DM_WINDOW=1` for a window with keyboard input (Space shakes) and physical controllers (face buttons by position as on the iPhone, a Nintendo pad by its labels: `pad_apple.h`). On the Mac and iOS each controller is a player of its own, for local co-op: the first one connected is player 1, together with the keyboard (iOS: the touch gamepad and the phone's gyro), the next player 2, and so on up to 8 (`pad_slots.h`); a controller that is removed frees its player and gets it back when it reconnects, and the log names each one's player and npad (`controller 'Xbox Wireless Controller' connected: player 2 (npad 1)`). Player 1 is the Handheld npad in handheld mode and No1 docked, player n is No n; the game's supported npad ids decide how many play (`hle_hid.c`): a one-player game gets every controller as player 1, and a controller past a game's last player is not used. `DM_PAD_MERGE=1` makes every controller player 1, as before (on iOS from `Documents/env.txt`); `DM_KBD_PLAYER=own` makes the keyboard player 1 on its own, with the controllers from player 2 on. The window goes fullscreen from its green button or ⌃⌘F; `DM_FULLSCREEN=1` starts it that way and `DM_SCREEN=<NSScreenNumber>` opens it on that screen instead of the one macOS picks. In fullscreen, a screen whose refresh rate is not a multiple of the game's (144 or 165 Hz) runs at one that is (120 Hz) until the window leaves fullscreen; `DM_SCREEN_MATCH=0` keeps its rate. The drawable follows the window in pixels (fullscreen at the screen's resolution); `DM_METAL_HUD=1` shows Apple's performance HUD (on the iPhone too, from `Documents/env.txt`). The left mouse button is the touchscreen, on the 16:9 picture. Motion: a controller with a gyroscope drives its player's six-axis sensor (`motion_apple.h` → `dm_motion_set`, `hle_hid.c`; orientation from the gyro with tilt correction toward gravity, `motion_fusion.h`), and on iOS the phone's own device motion drives player 1's while no controller supplies fresh motion (`DmGamepad.m`, in the Switch frame: the pad view's own frame on iOS 27 and later (`deviceMotionBody`), turned for the screen's orientation before that ([The phone's motion in the picture's frame](reference/services.md#the-phones-motion-in-the-pictures-frame)); `DM_PHONE_MOTION=0|1|auto`; `1` selects only the phone). On the Mac, a Switch Pro Controller whose GameController motion is empty can use passive HID reports instead (`motion_pro_mac.h`; `DM_MOTION_HID=0` turns this reader off). This requires exactly one Pro in each API so it can use the same player slot without guessing; multiple Pros retain GameController input. Raw HID has its own orientation and nominal sensor scales; hardware validation of the reworked reader remains open ([Pro Controller fallback](reference/services.md#switch-pro-controller-advertises-motion-but-sends-zeroes)). `DM_MOTION_AXES` / `DM_MOTION_ACC_SIGN` apply only to GameController. Each source keeps its own orientation. Without live motion the sensor lies flat as before. `DM_MOTION_LOG=1` logs player 1's mapped sample once a second per source; `DM_MOTION_AXES` (e.g. `x,-z,y`) and `DM_MOTION_ACC_SIGN=-1` remap a controller whose axes differ, `DM_MOTION_GAIN` sets the tilt correction (0.5), `DM_MOTION=0` turns motion off (the NSP script's `--no-motion` builds it in). The console's own sensor (`SevenSixAxisSensor`, read in handheld mode) still reports no states. In handheld mode the touches also drive `hid::GetGestureStates` (taps, presses, pans, swipes, pinches and rotations recognized by the host, `hle_touch.c`) |
++| Input | iOS: the touch gamepad (hidden while a physical controller is connected) and physical controllers; shaking the phone shakes the controller (its six-axis sensor, `hle_hid.c`; the accelerometer in `DmGamepad.m`, threshold `DM_SHAKE_G`, 1.5 G by default). Mac: scripted input (`DM_KEYS=<seconds>:<button>,…`, `Shake` for a shake, with `DM_KBD=<text>` answering the system keyboard; `DM_REC=<file>` records what the player does in that syntax, [05](agents/05-debugging.md#scripted-input-and-thread-scheduling)) or `DM_WINDOW=1` for a window with keyboard input (Space shakes) and physical controllers (face buttons by position as on the iPhone, a Nintendo pad by its labels: `pad_apple.h`). On the Mac and iOS each controller is a player of its own, for local co-op: the first one connected is player 1, together with the keyboard (iOS: the touch gamepad and the phone's gyro), the next player 2, and so on up to 8 (`pad_slots.h`); a controller that is removed frees its player and gets it back when it reconnects, and the log names each one's player and npad (`controller 'Xbox Wireless Controller' connected: player 2 (npad 1)`). Player 1 is the Handheld npad in handheld mode and No1 docked, player n is No n; the game's supported npad ids decide how many play (`hle_hid.c`): a one-player game gets every controller as player 1, and a controller past a game's last player is not used. `DM_PAD_MERGE=1` makes every controller player 1, as before (on iOS from `Documents/env.txt`); `DM_NETPAD=<port>` (Mac) lets phones and other local programs be controllers over UDP on `127.0.0.1`, each a player of its own ([Network pads](mac-controllers.md#network-pads-phones-and-other-programs)); `DM_KBD_PLAYER=own` makes the keyboard player 1 on its own, with the controllers from player 2 on. The window goes fullscreen from its green button or ⌃⌘F; `DM_FULLSCREEN=1` starts it that way and `DM_SCREEN=<NSScreenNumber>` opens it on that screen instead of the one macOS picks. In fullscreen, a screen whose refresh rate is not a multiple of the game's (144 or 165 Hz) runs at one that is (120 Hz) until the window leaves fullscreen; `DM_SCREEN_MATCH=0` keeps its rate. The drawable follows the window in pixels (fullscreen at the screen's resolution); `DM_METAL_HUD=1` shows Apple's performance HUD (on the iPhone too, from `Documents/env.txt`). The left mouse button is the touchscreen, on the 16:9 picture. Motion: a controller with a gyroscope drives its player's six-axis sensor (`motion_apple.h` → `dm_motion_set`, `hle_hid.c`; orientation from the gyro with tilt correction toward gravity, `motion_fusion.h`), and on iOS the phone's own device motion drives player 1's while no controller supplies fresh motion (`DmGamepad.m`, in the Switch frame: the pad view's own frame on iOS 27 and later (`deviceMotionBody`), turned for the screen's orientation before that ([The phone's motion in the picture's frame](reference/services.md#the-phones-motion-in-the-pictures-frame)); `DM_PHONE_MOTION=0|1|auto`; `1` selects only the phone). On the Mac, a Switch Pro Controller whose GameController motion is empty can use passive HID reports instead (`motion_pro_mac.h`; `DM_MOTION_HID=0` turns this reader off). This requires exactly one Pro in each API so it can use the same player slot without guessing; multiple Pros retain GameController input. Raw HID has its own orientation and nominal sensor scales; hardware validation of the reworked reader remains open ([Pro Controller fallback](reference/services.md#switch-pro-controller-advertises-motion-but-sends-zeroes)). `DM_MOTION_AXES` / `DM_MOTION_ACC_SIGN` apply only to GameController. Each source keeps its own orientation. Without live motion the sensor lies flat as before. `DM_MOTION_LOG=1` logs player 1's mapped sample once a second per source; `DM_MOTION_AXES` (e.g. `x,-z,y`) and `DM_MOTION_ACC_SIGN=-1` remap a controller whose axes differ, `DM_MOTION_GAIN` sets the tilt correction (0.5), `DM_MOTION=0` turns motion off (the NSP script's `--no-motion` builds it in). The console's own sensor (`SevenSixAxisSensor`, read in handheld mode) still reports no states. In handheld mode the touches also drive `hid::GetGestureStates` (taps, presses, pans, swipes, pinches and rotations recognized by the host, `hle_touch.c`) |
+ | iOS app | One unsigned IPA for iPhone and iPad. The rewritten code is embedded in the executable; the shader libraries, the RomFS and the game icon are inside the app. A settings screen comes before the game (`Launcher.swift`, drawn from `dm/launcher.json`, which `dm/games/settings.py` writes from `dm/games/settings.tsv`); the host's loading starts at app launch meanwhile, and the frame rate and render scale go into the frame step state when the game starts (`loader.c` `dm_fps_state_apply`) |
+ | Known gaps | Conditional render is always drawn; [indirect-count multi-draws](reference/rendering.md#indirect-count-multi-draws) can wait for a GPU-written count when the records need conversion, cannot be GPU-masked, or exceed the mask table capacity; geometry shaders do not translate. TBDR optimizations are off by default (they don't understand bindless textures yet). No amiibo. On the Mac, Mario's menu and dialogue text render blank (fine on the iPhone) |
+ 
+diff --git a/docs/env_switches.tsv b/docs/env_switches.tsv
+index 03df927..b09134a 100644
+--- a/docs/env_switches.tsv
++++ b/docs/env_switches.tsv
+@@ -124,6 +124,7 @@ DM_MOTION_LOG	diagnostic	`=1` logs player 1's mapped motion sample once a second
+ DM_MOVIE_TRACE	diagnostic	When set, the movie decoder logs every call with its thread and decoder (by default the first 12 calls, then every 2^k-th)
+ DM_MSL_DIR	path	Parent folder of the shader libraries: NVN loads from `b-<chain version>/` or the one file `b-<chain version>.img` beneath it, Vulkan from `vk/`, GL from `gl/`; the app and the Mac launcher set it
+ DM_NDVE_ENGINE	switch	`0` runs nn::ndve's movie network (Ocarina of Time's title and opening movies) as the game's 12 translated dispatches after its colour conversion instead of the host's kernels (dm/gfx/msl/ndve_engine.metal, on by default: the same output, about half the frame's GPU time on an M4 Pro); `ab` alternates with DM_AB; `check` runs the game's dispatches and the host's network beside them and logs every 300 frames how many texels of the two differ. The host's kernels take only the model they were written for, bound by its shaders' keys and its weights' layout (docs/reference/shaders.md, The NDVE movie network by the host)
++DM_NETPAD	switch	`=<port>` (the launcher's Phone controllers setting sets 47600; Mac only) listens on `127.0.0.1:<port>` for UDP datagrams from a phone or another local program, and each pad that sends is a player of its own like a controller (`netpad.h`, `netpad_mac.m`, [Network pads](mac-controllers.md#network-pads-phones-and-other-programs)). Off when unset or `0`. Any process on this Mac can send to a loopback port, so it is opt-in
+ DM_NICK	switch	The account nickname the game sees (default `Player`)
+ DM_NRO	switch	`0` turns off loading of the NRO modules the game's NRR files register (on by default): every `nn::ro::LoadModule` then fails
+ DM_NRO_CAPTURE	diagnostic	folder: a `nn::ro::LoadModule` with no rewritten copy writes the image to `<folder>/<SHA-256>.nro` and ends the run (the NSP script's capture of an NRO the game decodes at run time)
+diff --git a/docs/mac-controllers.md b/docs/mac-controllers.md
+index e633df5..35639ad 100644
+--- a/docs/mac-controllers.md
++++ b/docs/mac-controllers.md
+@@ -155,6 +155,29 @@ Native, Pro Controller and phone motion keep their live orientation during
+ mapped Shake, adding the shake acceleration. Direct Steam motion retains its
+ whole synthetic Shake cycle, then resumes its recorded physical samples.
+ 
++## Network pads: phones and other programs
++
++`DM_NETPAD=<port>` makes the game listen on `127.0.0.1:<port>` for UDP datagrams and gives each pad that sends a player of its own, as a physical controller has ([`netpad.h`](../dm/host/netpad.h), `netpad_mac.m`). The launcher's **Phone controllers** setting sets `DM_NETPAD=47600` ([Settings](settings.md#phone-controllers)). The engine ships no sender: a phone's web page and a bridge on the Mac, or any program, can be one. This is local input for one Mac, not networked play ([MULTIPLAYER.md](MULTIPLAYER.md)).
++
++| Message | Meaning |
++|---|---|
++| `P <pad> <buttons> <lx> <ly> <rx> <ry>` | the pad's whole state. `<pad>` 1 to 8 is the sender's own number for the pad. `<buttons>` is a decimal number of the 16 button bits of `dm_input.h` (A 1, B 2, X 4, Y 8, … Down 32768; other bits are dropped). Sticks run from -32767 to 32767 (larger values are clamped), +y is up |
++| `L <pad>` | the pad has left: everything is released and its player is free |
++
++- One datagram is one message, plain ASCII, fields split by spaces, a trailing newline is fine. Anything else is ignored whole, including a datagram over 96 bytes.
++- A sender repeats `P` about once a second while nothing changes. A pad that sends nothing for 2 seconds has left too, so a sender that dies cannot leave a button held.
++- The pad number is not the player. The pad takes a player like a controller does (`pad_slots.h`): the lowest free one, player 1 when it is free, its old player when it comes back. It never shares a player with a controller or the keyboard, `DM_KBD_PLAYER=own` keeps player 1 for the keyboard, and `DM_PAD_PRESS_TO_JOIN=1` makes a pad a player at its first message with a button pressed. With `DM_PAD_MERGE=1` every pad is merged into player 1. The log names each one (`network pad 2: player 3`), and a pad that finds all eight players taken is logged once and joins when one is free.
++- A pad counts for the controller applet's prompt ("N players wanted"), and its A and B close it. While the window is not in focus its buttons are released, as a controller's are.
++- Not covered: rumble and motion are not sent back, and a pad is not a Joy-Con (no rail buttons, Shake or touch).
++
++```sh
++echo "P 1 1 0 0 0 0" | nc -u -w1 127.0.0.1 47600       # pad 1 presses A (a player joins)
++echo "P 1 0 32767 0 0 0" | nc -u -w1 127.0.0.1 47600   # releases it, left stick right
++echo "L 1" | nc -u -w1 127.0.0.1 47600                  # pad 1 leaves
++```
++
++**Security.** A loopback port is open to every program on this Mac, and any of them can press buttons in the game. That is why it is off unless the player turns it on. Nothing outside the Mac can reach it. A sender on a phone reaches it through a program on the Mac that listens on the network and forwards to the port, which is the player's choice to run.
++
+ ## Shared launcher controls
+ 
+ The [controls coordination comment on PR #221](https://github.com/seedds/nxnative/pull/221#issuecomment-6441650311)
+diff --git a/docs/settings.md b/docs/settings.md
+index b135b36..a795e26 100644
+--- a/docs/settings.md
++++ b/docs/settings.md
+@@ -4,7 +4,7 @@ The screen before the game starts shows the settings the game supports. A settin
+ 
+ - [Tested defaults](#tested-defaults)
+ - [Game](#game): [Frame rate](#frame-rate), [Render scale](#render-scale), [Console mode](#console-mode), [Upscaling](#upscaling), [Game's upscaler](#games-upscaler), [Game language](#game-language), [Picture](#picture), [Frame-rate counter](#frame-rate-counter)
+-- [Controls](#controls): [Touch feedback](#touch-feedback), [Touch controls size and left stick](#touch-controls-size-and-left-stick), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join)
++- [Controls](#controls): [Touch feedback](#touch-feedback), [Touch controls size and left stick](#touch-controls-size-and-left-stick), [Game rumble](#game-rumble), [Rumble strength](#rumble-strength), [Rumble cutoff](#rumble-cutoff), [Press a button to join](#press-a-button-to-join), [Phone controllers](#phone-controllers)
+ - [Performance](#performance): [Frame buffering](#frame-buffering), [Metal 4 pipelines](#metal-4-pipelines), [Pipeline prebuild](#pipeline-prebuild), [Encode thread](#encode-thread), [Shader prefetch](#shader-prefetch), [Downsample HDR textures](#downsample-hdr-textures), [Hold frames when late](#hold-frames-when-late), [Performance HUD](#performance-hud), [Reset to tested defaults](#reset-to-tested-defaults)
+ - [The Mac settings window](#the-mac-settings-window): [Display mode](#display-mode)
+ - [In-game menu](#in-game-menu)
+@@ -117,6 +117,10 @@ A controller's vibration weaker than this stays off, and the rest is spread over
+ 
+ Off by default: each controller is a player as soon as it connects, in the order the system lists them. On: a controller becomes a player only when you press one of its buttons, as the lowest player free, so the players choose their order and how many play. That press also reaches the game. When a game asks for more players than have joined, a prompt over the game waits for the others to press a button; B closes it.
+ 
++### Phone controllers
++
++Mac only, off by default. On, the app listens on this Mac for controller input sent by a phone or another program and gives each sender a player of its own, like a controller ([Network pads](mac-controllers.md#network-pads-phones-and-other-programs)). It listens on `127.0.0.1` only, so nothing outside this Mac can reach it, but any program on this Mac can send input to it while it is on. It needs a sender: the app does not include one. Rumble and motion are not sent to the phone.
++
+ ## Performance
+ 
+ These settings change how the app hands frames to the screen and how it prepares the GPU's work. The game's tested defaults are a good start; change them when a game stutters, runs hot, or you want less latency.
+@@ -299,6 +303,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under
+ | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |
+ | Rumble cutoff | `DM_RUMBLE_MIN` | `0` to `0.9` |
+ | Press a button to join | `DM_PAD_PRESS_TO_JOIN` | `1`, `0` |
++| Phone controllers (Mac) | `DM_NETPAD` | `47600`, `0` |
+ | Upscaling | `DM_PRESENT_UPSCALE` | `off`, `metalfx` |
+ | Game's upscaler | `DM_UPSCALER` | `game`, `metalfx` |
+ | Frame buffering | `DM_PRESENT_SNAP` | `1`, `0` |
